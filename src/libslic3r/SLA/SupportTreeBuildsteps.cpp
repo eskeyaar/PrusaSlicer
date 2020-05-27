@@ -42,6 +42,8 @@ bool SupportTreeBuildsteps::execute(SupportTreeBuilder &   builder,
 {
     if(sm.pts.empty()) return false;
     
+    builder.ground_level = sm.emesh.ground_level() - sm.cfg.object_elevation_mm;
+
     SupportTreeBuildsteps alg(builder, sm);
     
     // Let's define the individual steps of the processing. We can experiment
@@ -166,64 +168,6 @@ bool SupportTreeBuildsteps::execute(SupportTreeBuilder &   builder,
     return pc == ABORT;
 }
 
-// Give points on a 3D ring with given center, radius and orientation
-// method based on:
-// https://math.stackexchange.com/questions/73237/parametric-equation-of-a-circle-in-3d-space
-template<size_t N>
-class PointRing {
-    std::array<double, N> m_phis;
-    
-    // Two vectors that will be perpendicular to each other and to the
-    // axis. Values for a(X) and a(Y) are now arbitrary, a(Z) is just a
-    // placeholder.
-    // a and b vectors are perpendicular to the ring direction and to each other.
-    // Together they define the plane where we have to iterate with the
-    // given angles in the 'm_phis' vector
-    Vec3d a = {0, 1, 0}, b;
-    double m_radius = 0.;
-    
-    static inline bool constexpr is_one(double val) 
-    { 
-        return std::abs(std::abs(val) - 1) < 1e-20;
-    }
-    
-public:
-    
-    PointRing(const Vec3d &n)
-    {
-        m_phis = linspace_array<N>(0., 2 * PI);
-    
-        // We have to address the case when the direction vector v (same as
-        // dir) is coincident with one of the world axes. In this case two of
-        // its components will be completely zero and one is 1.0. Our method
-        // becomes dangerous here due to division with zero. Instead, vector
-        // 'a' can be an element-wise rotated version of 'v'
-        if(is_one(n(X)) || is_one(n(Y)) || is_one(n(Z))) {
-            a = {n(Z), n(X), n(Y)};
-            b = {n(Y), n(Z), n(X)};
-        }
-        else {
-            a(Z) = -(n(Y)*a(Y)) / n(Z); a.normalize();
-            b = a.cross(n);
-        }
-    }
-    
-    Vec3d get(size_t idx, const Vec3d src, double r) const
-    {
-        double phi = m_phis[idx];
-        double sinphi = std::sin(phi);
-        double cosphi = std::cos(phi);
-     
-        double rpscos = r * cosphi;
-        double rpssin = r * sinphi;
-     
-        // Point on the sphere
-        return {src(X) + rpscos * a(X) + rpssin * b(X),
-                src(Y) + rpscos * a(Y) + rpssin * b(Y),
-                src(Z) + rpscos * a(Z) + rpssin * b(Z)};
-    }
-};
-
 template<class C, class Hit = EigenMesh3D::hit_result> 
 static Hit min_hit(const C &hits)
 {
@@ -321,12 +265,12 @@ EigenMesh3D::hit_result SupportTreeBuildsteps::bridge_mesh_intersect(
     
     // Hit results
     std::array<Hit, SAMPLES> hits;
+
+    const double sd = 0.;//r * m_cfg.safety_distance_mm / m_cfg.head_back_radius_mm;
     
     ccr::enumerate(hits.begin(), hits.end(), 
-                   [this, r, src, ins_check, &ring, dir] (Hit &hit, size_t i) {
-        
-        const double sd = m_cfg.safety_distance_mm;
-        
+                [this, r, src, ins_check, &ring, dir, sd] (Hit &hit, size_t i) {
+
         // Point on the circle on the pin sphere
         Vec3d p = ring.get(i, src, r + sd);
         
@@ -520,40 +464,6 @@ bool SupportTreeBuildsteps::connect_to_nearpillar(const Head &head,
     return true;
 }
 
-bool SupportTreeBuildsteps::search_pillar_and_connect(const Head &head)
-{
-    PointIndex spindex = m_pillar_index.guarded_clone();
-    
-    long nearest_id = ID_UNSET;
-    
-    Vec3d querypoint = head.junction_point();
-    
-    while(nearest_id < 0 && !spindex.empty()) { m_thr();
-        // loop until a suitable head is not found
-        // if there is a pillar closer than the cluster center
-        // (this may happen as the clustering is not perfect)
-        // than we will bridge to this closer pillar
-        
-        Vec3d qp(querypoint(X), querypoint(Y), m_builder.ground_level);
-        auto qres = spindex.nearest(qp, 1);
-        if(qres.empty()) break;
-        
-        auto ne = qres.front();
-        nearest_id = ne.second;
-        
-        if(nearest_id >= 0) {
-            if(size_t(nearest_id) < m_builder.pillarcount()) {
-                if(!connect_to_nearpillar(head, nearest_id)) {
-                    nearest_id = ID_UNSET;    // continue searching
-                    spindex.remove(ne);       // without the current pillar
-                }
-            }
-        }
-    }
-    
-    return nearest_id >= 0;
-}
-
 void SupportTreeBuildsteps::create_ground_pillar(const Vec3d &jp,
                                                  const Vec3d &sourcedir,
                                                  double       radius,
@@ -712,84 +622,85 @@ void SupportTreeBuildsteps::filter()
         auto [polar, azimuth] = dir_to_spheric(n);
         
         // skip if the tilt is not sane
-        if(polar >= PI - m_cfg.normal_cutoff_angle) {
+        if(polar < PI - m_cfg.normal_cutoff_angle) return;
             
-            // We saturate the polar angle to 3pi/4
-            polar = std::max(polar, 3*PI / 4);
-            
-            // save the head (pinpoint) position
-            Vec3d hp = m_points.row(fidx);
-            
-            double w = m_cfg.head_width_mm +
-                       m_cfg.head_back_radius_mm +
-                       2*m_cfg.head_front_radius_mm;
-            
-            double pin_r = double(m_support_pts[fidx].head_front_radius);
-            
-            // Reassemble the now corrected normal
-            auto nn = spheric_to_dir(polar, azimuth).normalized();
-            
-            // check available distance
-            EigenMesh3D::hit_result t
-                = pinhead_mesh_intersect(hp, // touching point
-                                         nn, // normal
-                                         pin_r,
-                                         m_cfg.head_back_radius_mm,
-                                         w);
-            
-            if(t.distance() <= w) {
-                
-                // Let's try to optimize this angle, there might be a
-                // viable normal that doesn't collide with the model
-                // geometry and its very close to the default.
-                
-                StopCriteria stc;
-                stc.max_iterations = m_cfg.optimizer_max_iterations;
-                stc.relative_score_difference = m_cfg.optimizer_rel_score_diff;
-                stc.stop_score = w; // space greater than w is enough
-                GeneticOptimizer solver(stc);
-                solver.seed(0); // we want deterministic behavior
-                
-                auto oresult = solver.optimize_max(
-                    [this, pin_r, w, hp](double plr, double azm)
-                    {
-                        auto dir = spheric_to_dir(plr, azm).normalized();
-                        
-                        double score = pinhead_mesh_distance(
-                            hp, dir, pin_r, m_cfg.head_back_radius_mm, w);
-                        
-                        return score;
-                    },
-                    initvals(polar, azimuth), // start with what we have
-                    bound(3 * PI / 4, PI),    // Must not exceed the tilt limit
-                    bound(-PI, PI) // azimuth can be a full search
-                    );
-                
-                if(oresult.score > w) {
-                    polar = std::get<0>(oresult.optimum);
-                    azimuth = std::get<1>(oresult.optimum);
-                    nn = spheric_to_dir(polar, azimuth).normalized();
-                    t = EigenMesh3D::hit_result(oresult.score);
-                }
-            }
-            
-            // save the verified and corrected normal
-            m_support_nmls.row(fidx) = nn;
-            
-            if (t.distance() > w) {
-                // Check distance from ground, we might have zero elevation.
-                if (hp(Z) + w * nn(Z) < m_builder.ground_level) {
-                    addfn(m_iheadless, fidx);
-                } else {
-                    // mark the point for needing a head.
-                    addfn(m_iheads, fidx);
-                }
-            } else if (polar >= 3 * PI / 4) {
-                // Headless supports do not tilt like the headed ones
-                // so the normal should point almost to the ground.
-                addfn(m_iheadless, fidx);
+        // We saturate the polar angle to 3pi/4
+        polar = std::max(polar, 3*PI / 4);
+
+        // save the head (pinpoint) position
+        Vec3d hp = m_points.row(fidx);
+
+        // The distance needed for a pinhead to not collide with model.
+        double w = m_cfg.head_width_mm +
+                   m_cfg.head_back_radius_mm +
+                   2*m_cfg.head_front_radius_mm;
+
+        double pin_r = double(m_support_pts[fidx].head_front_radius);
+
+        // Reassemble the now corrected normal
+        auto nn = spheric_to_dir(polar, azimuth).normalized();
+
+        // check available distance
+        EigenMesh3D::hit_result t
+            = pinhead_mesh_intersect(hp, // touching point
+                                     nn, // normal
+                                     pin_r,
+                                     m_cfg.head_back_radius_mm,
+                                     w);
+
+        if(t.distance() <= w) {
+
+            // Let's try to optimize this angle, there might be a
+            // viable normal that doesn't collide with the model
+            // geometry and its very close to the default.
+
+            StopCriteria stc;
+            stc.max_iterations = m_cfg.optimizer_max_iterations;
+            stc.relative_score_difference = m_cfg.optimizer_rel_score_diff;
+            stc.stop_score = w; // space greater than w is enough
+            GeneticOptimizer solver(stc);
+            solver.seed(0); // we want deterministic behavior
+
+            auto oresult = solver.optimize_max(
+                [this, pin_r, w, hp](double plr, double azm)
+                {
+                    auto dir = spheric_to_dir(plr, azm).normalized();
+
+                    double score = pinhead_mesh_intersect(
+                        hp, dir, pin_r, m_cfg.head_back_radius_mm, w).distance();
+
+                    return score;
+                },
+                initvals(polar, azimuth), // start with what we have
+                bound(3 * PI / 4, PI),    // Must not exceed the tilt limit
+                bound(-PI, PI) // azimuth can be a full search
+                );
+
+            if(oresult.score > w) {
+                polar = std::get<0>(oresult.optimum);
+                azimuth = std::get<1>(oresult.optimum);
+                nn = spheric_to_dir(polar, azimuth).normalized();
+                t = EigenMesh3D::hit_result(oresult.score);
             }
         }
+
+        // save the verified and corrected normal
+        m_support_nmls.row(fidx) = nn;
+
+        if (t.distance() > w) {
+            // Check distance from ground, we might have zero elevation.
+            if (hp(Z) + w * nn(Z) < m_builder.ground_level) {
+                addfn(m_iheadless, fidx);
+            } else {
+                // mark the point for needing a head.
+                addfn(m_iheads, fidx);
+            }
+        } else if (polar >= 3 * PI / 4) {
+            // Headless supports do not tilt like the headed ones
+            // so the normal should point almost to the ground.
+            addfn(m_iheadless, fidx);
+        }
+
     };
     
     ccr::enumerate(filtered_indices.begin(), filtered_indices.end(), filterfn);
@@ -943,7 +854,7 @@ bool SupportTreeBuildsteps::connect_to_ground(Head &head, const Vec3d &dir)
     double r = head.r_back_mm;
     double t = bridge_mesh_distance(hjp, dir, head.r_back_mm);
     double d = 0, tdown = 0;
-    t = std::min(t, m_cfg.max_bridge_length_mm);
+    t = std::min(t, m_cfg.max_bridge_length_mm * head.r_back_mm / m_cfg.head_back_radius_mm );
 
     while (d < t && !std::isinf(tdown = bridge_mesh_distance(hjp + d * dir, DOWN, r)))
         d += r;
@@ -1041,6 +952,42 @@ bool SupportTreeBuildsteps::connect_to_model_body(Head &head)
     return true;
 }
 
+bool SupportTreeBuildsteps::search_pillar_and_connect(const Head &source)
+{
+    // Hope that a local copy takes less time than the whole search loop.
+    // We also need to remove elements progressively from the copied index.
+    PointIndex spindex = m_pillar_index.guarded_clone();
+
+    long nearest_id = ID_UNSET;
+
+    Vec3d querypt = source.junction_point();
+
+    while(nearest_id < 0 && !spindex.empty()) { m_thr();
+        // loop until a suitable head is not found
+        // if there is a pillar closer than the cluster center
+        // (this may happen as the clustering is not perfect)
+        // than we will bridge to this closer pillar
+
+        Vec3d qp(querypt(X), querypt(Y), m_builder.ground_level);
+        auto qres = spindex.nearest(qp, 1);
+        if(qres.empty()) break;
+
+        auto ne = qres.front();
+        nearest_id = ne.second;
+
+        if(nearest_id >= 0) {
+            if(size_t(nearest_id) < m_builder.pillarcount()) {
+                if(!connect_to_nearpillar(source, nearest_id)) {
+                    nearest_id = ID_UNSET;    // continue searching
+                    spindex.remove(ne);       // without the current pillar
+                }
+            }
+        }
+    }
+
+    return nearest_id >= 0;
+}
+
 void SupportTreeBuildsteps::routing_to_model()
 {   
     // We need to check if there is an easy way out to the bed surface.
@@ -1054,18 +1001,18 @@ void SupportTreeBuildsteps::routing_to_model()
         auto& head = m_builder.head(idx);
         
         // Search nearby pillar
-        if(search_pillar_and_connect(head)) { head.transform(); return; }
+        if (search_pillar_and_connect(head)) { head.transform(); return; }
         
         // Cannot connect to nearby pillar. We will try to search for
         // a route to the ground.
-        if(connect_to_ground(head)) { head.transform(); return; }
+        if (connect_to_ground(head)) { head.transform(); return; }
         
         // No route to the ground, so connect to the model body as a last resort
         if (connect_to_model_body(head)) { return; }
         
         // We have failed to route this head.
         BOOST_LOG_TRIVIAL(warning)
-            << "Failed to route model facing support point. ID: " << idx;
+                << "Failed to route model facing support point. ID: " << idx;
         
         head.invalidate();
     });
@@ -1290,34 +1237,50 @@ void SupportTreeBuildsteps::routing_headless()
     // the pin radius
     for(unsigned i : m_iheadless) {
         m_thr();
-        
+
         const auto R = double(m_support_pts[i].head_front_radius);
-        const double HWIDTH_MM = std::min(R, m_cfg.head_penetration_mm);
-        
-        // Exact support position
+
+        // The support point position on the mesh
         Vec3d sph = m_support_pts[i].pos.cast<double>();
-        Vec3d n = m_support_nmls.row(i);   // mesh outward normal
-        Vec3d sp = sph - n * HWIDTH_MM;     // stick head start point
-        
-        Vec3d sj = sp + R * n;              // stick start point
-        
-        // This is only for checking
-        double idist = bridge_mesh_distance(sph, DOWN, R, true);
-        double realdist = ray_mesh_intersect(sj, DOWN).distance();
-        double dist = realdist;
-        
-        if (std::isinf(dist)) dist = sph(Z) - m_builder.ground_level;
-        
-        if(std::isnan(idist) || idist < 2*R || std::isnan(dist) || dist < 2*R) {
-            BOOST_LOG_TRIVIAL(warning) << "Can not find route for headless"
-                                       << " support stick at: "
-                                       << sj.transpose();
-            continue;
+
+        // Get an initial normal from the filtering step
+        Vec3d n = m_support_nmls.row(i);
+
+        // First we need to determine the available space for a mini pinhead.
+        // The goal is the move away from the model a little bit to make the
+        // contact point small as possible and avoid pearcing the model body.
+        double pin_space = std::min(2 * R, bridge_mesh_distance(sph, n, R, true));
+
+        if (pin_space <= 0) continue;
+
+        auto &head = m_builder.add_head(i, R, R, pin_space,
+                                        m_cfg.head_penetration_mm, n, sph);
+
+        // collision check
+
+        if (!m_cfg.ground_facing_only) {
+            m_head_to_ground_scans[i] =
+                bridge_mesh_intersect(head.junction_point(), DOWN, R);
         }
-        
-        bool use_endball = !std::isinf(realdist);
-        Vec3d ej = sj + (dist + HWIDTH_MM) * DOWN ;
-        m_builder.add_compact_bridge(sp, ej, n, R, use_endball);
+
+
+        // Here the steps will be similar as in route_to_model step:
+        // 1. Search for a nearby pillar, include other mini pillars
+
+        // Search nearby pillar
+        if (search_pillar_and_connect(head)) { head.transform(); continue; }
+
+        // Cannot connect to nearby pillar. We will try to search for
+        // a route to the ground.
+        if (connect_to_ground(head)) { head.transform(); continue; }
+
+        // No route to the ground, so connect to the model body as a last resort
+        if (connect_to_model_body(head)) { continue; }
+
+        BOOST_LOG_TRIVIAL(warning) << "Can not find route for headless"
+                                   << " support stick at: "
+                                   << sph.transpose();
+        head.invalidate();
     }
 }
 
