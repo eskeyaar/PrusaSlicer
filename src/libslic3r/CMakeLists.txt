@@ -17,6 +17,7 @@ endif()
 add_library(libslic3r STATIC
     pchheader.cpp
     pchheader.hpp
+    AABBTreeIndirect.hpp
     BoundingBox.cpp
     BoundingBox.hpp
     BridgeDetector.cpp

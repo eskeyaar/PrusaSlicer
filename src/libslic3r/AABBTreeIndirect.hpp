@@ -10,6 +10,7 @@
 #include <limits>
 #include <type_traits>
 #include <vector>
+#include <Eigen/Geometry>
 
 #include "Utils.hpp" // for next_highest_power_of_2()
 

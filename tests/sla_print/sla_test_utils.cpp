@@ -105,8 +105,11 @@ void test_supports(const std::string          &obj_filename,
     // Create the special index-triangle mesh with spatial indexing which
     // is the input of the support point and support mesh generators
     sla::EigenMesh3D emesh{mesh};
+
+#ifdef SLIC3R_HOLE_RAYCASTER
     if (hollowingcfg.enabled) 
         emesh.load_holes(drainholes);
+#endif
     
     // Create the support point generator
     sla::SupportPointGenerator::Config autogencfg;

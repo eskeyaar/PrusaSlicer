@@ -6,5 +6,12 @@ add_executable(${_TEST_NAME}_tests ${_TEST_NAME}_tests_main.cpp
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r)
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
+add_executable(${_TEST_NAME}_spatindex_benchmark ${_TEST_NAME}_spatindex_tests_main.cpp
+    sla_spatindex_tests.cpp)
+#target_link_libraries(${_TEST_NAME}_spatindex_benchmark test_common)
+target_link_libraries(${_TEST_NAME}_spatindex_benchmark libslic3r)
+#target_include_directories(${_TEST_NAME}_spatindex_benchmark PRIVATE ${EIGEN3_INCLUDE_DIR})
+set_property(TARGET ${_TEST_NAME}_spatindex_benchmark PROPERTY FOLDER "tests")
+
 # catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: ")
 add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests ${CATCH_EXTRA_ARGS})
