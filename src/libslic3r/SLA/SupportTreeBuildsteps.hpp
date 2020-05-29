@@ -242,7 +242,7 @@ class SupportTreeBuildsteps {
         const Vec3d& s,
         const Vec3d& dir,
         double r,
-        bool ins_check = false);
+        double safety_d = std::nan(""));
     
     template<class...Args>
     inline double bridge_mesh_distance(Args&&...args) {

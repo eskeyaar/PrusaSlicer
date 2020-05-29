@@ -293,8 +293,8 @@ public:
     }
 };
 
-EigenMesh3D::hit_result query_hit(const SupportableMesh &msh, const Bridge &br);
-EigenMesh3D::hit_result query_hit(const SupportableMesh &msh, const Head &br);
+EigenMesh3D::hit_result query_hit(const SupportableMesh &msh, const Bridge &br, double safety_d = std::nan(""));
+EigenMesh3D::hit_result query_hit(const SupportableMesh &msh, const Head &br, double safety_d = std::nan(""));
 
 // This class will hold the support tree meshes with some additional
 // bookkeeping as well. Various parts of the support geometry are stored

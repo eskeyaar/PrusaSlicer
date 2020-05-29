@@ -573,7 +573,7 @@ EigenMesh3D::hit_result query_hit(const SupportableMesh &msh, const Head &h)
     return min_hit(hits);
 }
 
-EigenMesh3D::hit_result query_hit(const SupportableMesh &msh, const Bridge &br)
+EigenMesh3D::hit_result query_hit(const SupportableMesh &msh, const Bridge &br, double safety_d)
 {
     static const size_t SAMPLES = 8;
 
@@ -585,15 +585,16 @@ EigenMesh3D::hit_result query_hit(const SupportableMesh &msh, const Bridge &br)
     // Hit results
     std::array<Hit, SAMPLES> hits;
 
-    const double sd = 0.;//r * m_cfg.safety_distance_mm / m_cfg.head_back_radius_mm;
+    const double sd = std::isnan(safety_d) ? msh.cfg.safety_distance_mm : safety_d;
+    bool ins_check = sd < msh.cfg.safety_distance_mm;
 
-    auto hitfn = [&br, &ring, &msh, dir, sd](Hit &  hit, size_t i) {
+    auto hitfn = [&br, &ring, &msh, dir, sd, ins_check](Hit &  hit, size_t i) {
         // Point on the circle on the pin sphere
         Vec3d p = ring.get(i, br.startp, br.r + sd);
 
         auto hr = msh.emesh.query_ray_hit(p + sd * dir, dir);
 
-        if (hr.is_inside()) {
+        if (ins_check && hr.is_inside()) {
             if (hr.distance() > 2 * br.r + sd)
                 hit = Hit(0.0);
             else {

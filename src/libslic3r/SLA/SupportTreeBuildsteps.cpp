@@ -256,7 +256,7 @@ EigenMesh3D::hit_result SupportTreeBuildsteps::pinhead_mesh_intersect(
 }
 
 EigenMesh3D::hit_result SupportTreeBuildsteps::bridge_mesh_intersect(
-    const Vec3d &src, const Vec3d &dir, double r, bool ins_check)
+    const Vec3d &src, const Vec3d &dir, double r, double safety_d)
 {
     static const size_t SAMPLES = 8;
     PointRing<SAMPLES> ring{dir};
@@ -266,7 +266,9 @@ EigenMesh3D::hit_result SupportTreeBuildsteps::bridge_mesh_intersect(
     // Hit results
     std::array<Hit, SAMPLES> hits;
 
-    const double sd = 0.;//r * m_cfg.safety_distance_mm / m_cfg.head_back_radius_mm;
+    const double sd = std::isnan(safety_d) ? m_cfg.safety_distance_mm : safety_d;
+
+    bool ins_check = sd < m_cfg.safety_distance_mm;
     
     ccr::enumerate(hits.begin(), hits.end(), 
                 [this, r, src, ins_check, &ring, dir, sd] (Hit &hit, size_t i) {
@@ -274,7 +276,7 @@ EigenMesh3D::hit_result SupportTreeBuildsteps::bridge_mesh_intersect(
         // Point on the circle on the pin sphere
         Vec3d p = ring.get(i, src, r + sd);
         
-        auto hr = m_mesh.query_ray_hit(p + sd * dir, dir);
+        auto hr = m_mesh.query_ray_hit(p + r * dir, dir);
         
         if(ins_check && hr.is_inside()) {
             if(hr.distance() > 2 * r + sd) hit = Hit(0.0);
@@ -1249,7 +1251,7 @@ void SupportTreeBuildsteps::routing_headless()
         // First we need to determine the available space for a mini pinhead.
         // The goal is the move away from the model a little bit to make the
         // contact point small as possible and avoid pearcing the model body.
-        double pin_space = std::min(2 * R, bridge_mesh_distance(sph, n, R, true));
+        double pin_space = std::min(2 * R, bridge_mesh_distance(sph, n, R, 0.));
 
         if (pin_space <= 0) continue;
 
@@ -1262,7 +1264,6 @@ void SupportTreeBuildsteps::routing_headless()
             m_head_to_ground_scans[i] =
                 bridge_mesh_intersect(head.junction_point(), DOWN, R);
         }
-
 
         // Here the steps will be similar as in route_to_model step:
         // 1. Search for a nearby pillar, include other mini pillars
